@@ -388,6 +388,10 @@ export function apply(ctx: Context, config: Config): void {
     yield ctx.commands.register({
       name: 'reload',
       description: 'Hot-reload an installed plugin (no restart)',
+      // Required: a command must declare `input` for an argued line to be
+      // adjudicated as a command (matchEnter returns miss otherwise, and the
+      // line falls to the default sink as an ordinary message).
+      input: { hint: '<plugin-name>' },
       handler: async (invocation: CommandInvocation): Promise<CommandResult> => {
         const target = invocation.rawInput.trim()
         const loader = ctx.get('loader')
