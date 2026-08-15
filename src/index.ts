@@ -103,7 +103,10 @@ async function collectPackageModules(
   packageRoot: string,
 ): Promise<Set<string>> {
   const urls = new Set<string>()
-  const job = Map.prototype.get.call(internal.loadCache, entryUrl)
+  // Use the LoadCache's own get (returns the ModuleJob; on Node 24 the map
+  // value is a { [type]: ModuleJob } wrapper that Map.prototype.get would
+  // return instead).
+  const job = internal.loadCache.get(entryUrl)
   if (job === undefined) return urls
   const seen = new Set<string>()
   const stack = [job]
@@ -125,7 +128,7 @@ function clearCaches(internal: ModuleLoader, urls: Set<string>): () => void {
   const esmBackup = new Map<string, unknown>()
   const cjsBackup = new Map<string, NodeModule>()
   for (const url of urls) {
-    const job = Map.prototype.get.call(internal.loadCache, url)
+    const job = internal.loadCache.get(url)
     if (job !== undefined) {
       esmBackup.set(url, job)
       Map.prototype.delete.call(internal.loadCache, url)
@@ -192,7 +195,7 @@ export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ 
     return { ok: false, message: `cannot resolve the real path of "${pluginName}": ${renderError(error)}` }
   }
 
-  const job = Map.prototype.get.call(internal.loadCache, realEntryUrl)
+  const job = internal.loadCache.get(realEntryUrl)
   if (job === undefined || job.module === undefined) {
     trace('not in module cache', realEntryUrl)
     // Diagnostic: enumerate any cache keys that mention this plugin. Use the
