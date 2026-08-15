@@ -204,7 +204,11 @@ export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ 
       if (text.includes(fragment)) similar.push(text)
     }
     trace('similar cache keys', similar.length > 0 ? similar.join(' | ') : '(none)')
-    return { ok: false, message: `"${pluginName}" is not in the module cache (${realEntryUrl})` }
+    return {
+      ok: false,
+      message: `"${pluginName}" is not in the module cache (${realEntryUrl}); `
+        + `similar cache keys: ${similar.length > 0 ? similar.join(' | ') : '(none)'}`,
+    }
   }
   const plugin = loader.unwrapExports(job.module.getNamespace())
   if (plugin === undefined) {
