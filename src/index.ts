@@ -360,15 +360,22 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
   }
 
   const first = [...loader.entries()][0]
-  const baseUrl = first?.parent.tree.ctx.baseUrl
-  if (baseUrl === undefined || byScope.size === 0) {
+  const baseUrl = ctx.baseUrl ?? first?.parent.tree.ctx.baseUrl
+  if (baseUrl === undefined) {
+    ctx.logger.warn('[plugin-reloader] no base URL; watching disabled')
     return async () => {}
   }
   const modulesDir = resolve(fileURLToPath(new URL(baseUrl)), 'node_modules')
+  ctx.logger.warn('[plugin-reloader] watching under %s (scopes: %s)', modulesDir, [...byScope.keys()].join(', ') || '(none)')
+  if (byScope.size === 0) return async () => {}
 
   for (const [scope, pkgs] of byScope) {
     const scopeDir = resolve(modulesDir, scope)
-    if (!existsSync(scopeDir)) continue
+    if (!existsSync(scopeDir)) {
+      ctx.logger.warn('[plugin-reloader] scope dir missing, skipping: %s', scopeDir)
+      continue
+    }
+    ctx.logger.warn('[plugin-reloader] watching scope %s (%d packages: %s)', scopeDir, pkgs.size, [...pkgs].join(', '))
     for (const pkg of pkgs) {
       dependencySnapshots.set(`${scope}/${pkg}`, readDependencyMap(resolve(scopeDir, pkg)))
     }
