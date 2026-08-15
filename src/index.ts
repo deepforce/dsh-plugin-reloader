@@ -307,6 +307,32 @@ function readDependencyMap(packageRoot: string): string {
   }
 }
 
+/** One watched scope directory and the packages under it. */
+export interface WatchScope {
+  dir: string
+  packages: string[]
+}
+
+/** Live watch diagnostics, readable from the `/watch-status` command. */
+export interface WatchState {
+  started: boolean
+  modulesDir?: string
+  scopes: WatchScope[]
+  /** Total filesystem events observed by the watchers. */
+  events: number
+  /** The most recent event as "kind path". */
+  lastEvent?: string
+  /** Successful hot reloads triggered by the watcher. */
+  reloads: number
+  error?: string
+}
+
+/** Result of starting the watcher: the disposer plus live diagnostics. */
+export interface WatchHandle {
+  dispose: () => Promise<void>
+  state: WatchState
+}
+
 /**
  * Watch the loaded plugins through their scope directories. Code changes
  * hot-reload the owning plugin; a dependency-map change exits with the
@@ -319,13 +345,15 @@ function readDependencyMap(packageRoot: string): string {
  * replacement visible as add/unlink events under the same watcher.
  * @param ctx - plugin context.
  * @param config - resolved plugin config.
- * @returns an async disposer closing every watcher.
+ * @returns the disposer plus a live {@link WatchState} diagnostics object.
  */
-export async function startWatch(ctx: Context, config: Config): Promise<() => Promise<void>> {
+export async function startWatch(ctx: Context, config: Config): Promise<WatchHandle> {
   const loader = ctx.get('loader')
   const resolved = resolveConfig(config)
+  const state: WatchState = { started: false, scopes: [], events: 0, reloads: 0 }
   if (loader === undefined || loader.internal === undefined) {
-    throw new Error('loader internal is unavailable; watching disabled')
+    state.error = 'loader internal is unavailable'
+    return { dispose: async () => {}, state }
   }
 
   const watchers: FSWatcher[] = []
@@ -336,11 +364,8 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
     pending.set(pluginName, setTimeout(() => {
       pending.delete(pluginName)
       void reloadPlugin(ctx, pluginName).then((result) => {
-        if (result.ok) {
-          ctx.logger.warn('[plugin-reloader] %s', result.message)
-        } else {
-          ctx.logger.warn('[plugin-reloader] %s', result.message)
-        }
+        if (result.ok) state.reloads += 1
+        ctx.logger.warn('[plugin-reloader] %s', result.message)
       })
     }, resolved.debounceMs))
   }
@@ -362,20 +387,23 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
   const first = [...loader.entries()][0]
   const baseUrl = ctx.baseUrl ?? first?.parent.tree.ctx.baseUrl
   if (baseUrl === undefined) {
-    ctx.logger.warn('[plugin-reloader] no base URL; watching disabled')
-    return async () => {}
+    state.error = 'no base URL'
+    return { dispose: async () => {}, state }
   }
   const modulesDir = resolve(fileURLToPath(new URL(baseUrl)), 'node_modules')
-  ctx.logger.warn('[plugin-reloader] watching under %s (scopes: %s)', modulesDir, [...byScope.keys()].join(', ') || '(none)')
-  if (byScope.size === 0) return async () => {}
+  state.modulesDir = modulesDir
+  if (byScope.size === 0) {
+    state.error = `no plugins matched watchRoots ${JSON.stringify(resolved.watchRoots)}`
+    return { dispose: async () => {}, state }
+  }
 
   for (const [scope, pkgs] of byScope) {
     const scopeDir = resolve(modulesDir, scope)
     if (!existsSync(scopeDir)) {
-      ctx.logger.warn('[plugin-reloader] scope dir missing, skipping: %s', scopeDir)
+      state.error = `scope dir missing: ${scopeDir}`
       continue
     }
-    ctx.logger.warn('[plugin-reloader] watching scope %s (%d packages: %s)', scopeDir, pkgs.size, [...pkgs].join(', '))
+    state.scopes.push({ dir: scopeDir, packages: [...pkgs] })
     for (const pkg of pkgs) {
       dependencySnapshots.set(`${scope}/${pkg}`, readDependencyMap(resolve(scopeDir, pkg)))
     }
@@ -386,8 +414,10 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
       ignored: (path) => path.includes(`${resolve(scopeDir, 'node_modules')}`),
       awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
     })
-    watcher.on('all', (_event, path) => {
+    watcher.on('all', (event, path) => {
       const rel = relative(scopeDir, path)
+      state.events += 1
+      state.lastEvent = `${event} ${rel}`
       const [pkg, ...rest] = rel.split(/[\\/]/)
       if (pkg === undefined || !pkgs.has(pkg)) return
       const pluginName = `${scope}/${pkg}`
@@ -411,10 +441,14 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
     watchers.push(watcher)
   }
 
-  return async () => {
-    for (const watcher of watchers) await watcher.close()
-    for (const timer of pending.values()) clearTimeout(timer)
-    pending.clear()
+  state.started = watchers.length > 0
+  return {
+    dispose: async () => {
+      for (const watcher of watchers) await watcher.close()
+      for (const timer of pending.values()) clearTimeout(timer)
+      pending.clear()
+    },
+    state,
   }
 }
 
@@ -425,18 +459,27 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
  */
 export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
+  const watchState: WatchState = { started: false, scopes: [], events: 0, reloads: 0 }
 
   if (resolved.watchEnabled) {
     ctx.effect(() => {
-      let stop: (() => Promise<void>) | undefined
+      let dispose: (() => Promise<void>) | undefined
       void startWatch(ctx, config).then(
-        (cleanup) => { stop = cleanup },
+        (handle) => {
+          watchState.started = handle.state.started
+          watchState.modulesDir = handle.state.modulesDir
+          watchState.scopes = handle.state.scopes
+          watchState.error = handle.state.error
+          dispose = handle.dispose
+        },
         (error: unknown) => {
-          ctx.logger.warn('[plugin-reloader] watching disabled: %s', renderError(error))
+          watchState.error = renderError(error)
         },
       )
-      return () => { void stop?.() }
+      return () => { void dispose?.() }
     }, 'plugin-reloader: watch')
+  } else {
+    watchState.error = 'watchEnabled is false'
   }
 
   ctx.effect(function* () {
@@ -464,6 +507,22 @@ export function apply(ctx: Context, config: Config): void {
           ? { kind: 'success', text: result.message }
           : { kind: 'error', text: result.message }
       },
+    })
+    yield ctx.commands.register({
+      name: 'watch-status',
+      description: 'Show plugin-reloader watch status',
+      handler: (): CommandResult => ({
+        kind: 'success',
+        text: JSON.stringify({
+          started: watchState.started,
+          modulesDir: watchState.modulesDir,
+          scopes: watchState.scopes,
+          events: watchState.events,
+          lastEvent: watchState.lastEvent,
+          reloads: watchState.reloads,
+          error: watchState.error,
+        }, null, 2),
+      }),
     })
   }, 'plugin-reloader: commands')
 }

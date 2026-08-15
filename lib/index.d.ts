@@ -38,6 +38,29 @@ export declare function reloadPlugin(ctx: Context, pluginName: string): Promise<
     ok: boolean;
     message: string;
 }>;
+/** One watched scope directory and the packages under it. */
+export interface WatchScope {
+    dir: string;
+    packages: string[];
+}
+/** Live watch diagnostics, readable from the `/watch-status` command. */
+export interface WatchState {
+    started: boolean;
+    modulesDir?: string;
+    scopes: WatchScope[];
+    /** Total filesystem events observed by the watchers. */
+    events: number;
+    /** The most recent event as "kind path". */
+    lastEvent?: string;
+    /** Successful hot reloads triggered by the watcher. */
+    reloads: number;
+    error?: string;
+}
+/** Result of starting the watcher: the disposer plus live diagnostics. */
+export interface WatchHandle {
+    dispose: () => Promise<void>;
+    state: WatchState;
+}
 /**
  * Watch the loaded plugins through their scope directories. Code changes
  * hot-reload the owning plugin; a dependency-map change exits with the
@@ -50,9 +73,9 @@ export declare function reloadPlugin(ctx: Context, pluginName: string): Promise<
  * replacement visible as add/unlink events under the same watcher.
  * @param ctx - plugin context.
  * @param config - resolved plugin config.
- * @returns an async disposer closing every watcher.
+ * @returns the disposer plus a live {@link WatchState} diagnostics object.
  */
-export declare function startWatch(ctx: Context, config: Config): Promise<() => Promise<void>>;
+export declare function startWatch(ctx: Context, config: Config): Promise<WatchHandle>;
 /**
  * Register `/reload` and the watcher on the composed context.
  * @param ctx - context carrying the command registry.
