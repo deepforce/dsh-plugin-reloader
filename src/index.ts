@@ -450,9 +450,12 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
         }
         target.entrySig = entrySig
       } catch {
-        // Entry temporarily invisible (mid-replacement); drop the signature so
-        // the new file registers as a change on a later tick.
-        target.entrySig = undefined
+        // Entry temporarily invisible (pnpm replaces the plugin directory
+        // wholesale: delete then recreate). Mark a SEEN file as gone with an
+        // empty signature, so the recreated file (a non-empty signature)
+        // registers as a change on a later tick; a never-seen entry stays
+        // undefined and establishes its baseline on first appearance.
+        if (target.entrySig !== undefined) target.entrySig = ''
       }
       try {
         const pkgStat = statSync(target.pkgJson)
@@ -474,7 +477,8 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
         }
         target.pkgSig = pkgSig
       } catch {
-        target.pkgSig = undefined
+        // Same seen-then-gone semantics as the entry file above.
+        if (target.pkgSig !== undefined) target.pkgSig = ''
       }
     }
   }
