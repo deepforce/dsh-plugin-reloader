@@ -500,27 +500,26 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
  */
 export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
-  const watchState: WatchState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0 }
+  // The command reads the LIVE state object startWatch mutates (events,
+  // reloads, watcherReady), not a copied snapshot.
+  let liveState: WatchState | undefined
 
   if (resolved.watchEnabled) {
     ctx.effect(() => {
       let dispose: (() => Promise<void>) | undefined
       void startWatch(ctx, config).then(
         (handle) => {
-          watchState.started = handle.state.started
-          watchState.modulesDir = handle.state.modulesDir
-          watchState.scopes = handle.state.scopes
-          watchState.error = handle.state.error
+          liveState = handle.state
           dispose = handle.dispose
         },
         (error: unknown) => {
-          watchState.error = renderError(error)
+          liveState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0, error: renderError(error) }
         },
       )
       return () => { void dispose?.() }
     }, 'plugin-reloader: watch')
   } else {
-    watchState.error = 'watchEnabled is false'
+    liveState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0, error: 'watchEnabled is false' }
   }
 
   ctx.effect(function* () {
@@ -552,20 +551,23 @@ export function apply(ctx: Context, config: Config): void {
     yield ctx.commands.register({
       name: 'watch-status',
       description: 'Show plugin-reloader watch status',
-      handler: (): CommandResult => ({
-        kind: 'success',
-        text: JSON.stringify({
-          started: watchState.started,
-          modulesDir: watchState.modulesDir,
-          scopes: watchState.scopes,
-          watcherReady: watchState.watcherReady,
-          watcherError: watchState.watcherError,
-          events: watchState.events,
-          lastEvent: watchState.lastEvent,
-          reloads: watchState.reloads,
-          error: watchState.error,
-        }, null, 2),
-      }),
+      handler: (): CommandResult => {
+        const s = liveState ?? { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0 }
+        return {
+          kind: 'success',
+          text: JSON.stringify({
+            started: s.started,
+            modulesDir: s.modulesDir,
+            scopes: s.scopes,
+            watcherReady: s.watcherReady,
+            watcherError: s.watcherError,
+            events: s.events,
+            lastEvent: s.lastEvent,
+            reloads: s.reloads,
+            error: s.error,
+          }, null, 2),
+        }
+      },
     })
   }, 'plugin-reloader: commands')
 }
