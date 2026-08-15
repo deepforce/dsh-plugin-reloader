@@ -39,9 +39,15 @@ export declare function reloadPlugin(ctx: Context, pluginName: string): Promise<
     message: string;
 }>;
 /**
- * Watch the loaded plugins' real package directories. Code changes hot-reload
- * the owning plugin; a dependency-map change exits with the restart code so an
- * external supervisor can relaunch the process.
+ * Watch the loaded plugins through their scope directories. Code changes
+ * hot-reload the owning plugin; a dependency-map change exits with the
+ * restart code so an external supervisor can relaunch the process.
+ *
+ * The watcher watches each scope directory (node_modules/@deepseek-ai,
+ * node_modules/@deepforce) rather than the plugin directories themselves:
+ * pnpm upgrades replace a plugin directory wholesale (delete + recreate), which
+ * would detach a watcher rooted inside it. Watching the parent scope keeps the
+ * replacement visible as add/unlink events under the same watcher.
  * @param ctx - plugin context.
  * @param config - resolved plugin config.
  * @returns an async disposer closing every watcher.

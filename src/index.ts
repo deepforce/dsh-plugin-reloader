@@ -308,9 +308,15 @@ function readDependencyMap(packageRoot: string): string {
 }
 
 /**
- * Watch the loaded plugins' real package directories. Code changes hot-reload
- * the owning plugin; a dependency-map change exits with the restart code so an
- * external supervisor can relaunch the process.
+ * Watch the loaded plugins through their scope directories. Code changes
+ * hot-reload the owning plugin; a dependency-map change exits with the
+ * restart code so an external supervisor can relaunch the process.
+ *
+ * The watcher watches each scope directory (node_modules/@deepseek-ai,
+ * node_modules/@deepforce) rather than the plugin directories themselves:
+ * pnpm upgrades replace a plugin directory wholesale (delete + recreate), which
+ * would detach a watcher rooted inside it. Watching the parent scope keeps the
+ * replacement visible as add/unlink events under the same watcher.
  * @param ctx - plugin context.
  * @param config - resolved plugin config.
  * @returns an async disposer closing every watcher.
@@ -321,7 +327,6 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
   if (loader === undefined || loader.internal === undefined) {
     throw new Error('loader internal is unavailable; watching disabled')
   }
-  const internal = loader.internal
 
   const watchers: FSWatcher[] = []
   const pending = new Map<string, NodeJS.Timeout>()
@@ -332,7 +337,7 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
       pending.delete(pluginName)
       void reloadPlugin(ctx, pluginName).then((result) => {
         if (result.ok) {
-          ctx.logger.info('[plugin-reloader] %s', result.message)
+          ctx.logger.warn('[plugin-reloader] %s', result.message)
         } else {
           ctx.logger.warn('[plugin-reloader] %s', result.message)
         }
@@ -340,36 +345,49 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
     }, resolved.debounceMs))
   }
 
+  // Group the loaded plugins by scope, skipping this plugin itself.
+  const byScope = new Map<string, Set<string>>()
   for (const entry of [...loader.entries()]) {
     const pluginName = entry.options.name
-    const scope = pluginName.slice(0, pluginName.indexOf('/') + 1)
-    if (scope === '' || !resolved.watchRoots.includes(scope)) continue
-    if (!pluginName.startsWith('@')) continue
+    if (!pluginName.startsWith('@') || pluginName === name) continue
+    const slash = pluginName.indexOf('/')
+    const scope = pluginName.slice(0, slash)
+    const pkg = pluginName.slice(slash + 1)
+    if (pkg === '' || !resolved.watchRoots.includes(scope)) continue
+    const pkgs = byScope.get(scope) ?? new Set<string>()
+    pkgs.add(pkg)
+    byScope.set(scope, pkgs)
+  }
 
-    const baseUrl = entry.parent.tree.ctx.baseUrl
-    if (baseUrl === undefined) continue
-    let entryUrl: string
-    try {
-      entryUrl = await resolveUrl(internal, pluginName, baseUrl)
-    } catch {
-      continue
+  const first = [...loader.entries()][0]
+  const baseUrl = first?.parent.tree.ctx.baseUrl
+  if (baseUrl === undefined || byScope.size === 0) {
+    return async () => {}
+  }
+  const modulesDir = resolve(fileURLToPath(new URL(baseUrl)), 'node_modules')
+
+  for (const [scope, pkgs] of byScope) {
+    const scopeDir = resolve(modulesDir, scope)
+    if (!existsSync(scopeDir)) continue
+    for (const pkg of pkgs) {
+      dependencySnapshots.set(`${scope}/${pkg}`, readDependencyMap(resolve(scopeDir, pkg)))
     }
-    const packageRoot = findPackageRoot(fileURLToPath(entryUrl))
-    if (packageRoot === undefined) continue
-    const real = await realpath(packageRoot)
-    dependencySnapshots.set(pluginName, readDependencyMap(real))
 
-    const watcher = watch(real, {
+    const watcher = watch(scopeDir, {
       ignoreInitial: true,
-      depth: 4,
-      ignored: (path) => path.includes(`${resolve(real, 'node_modules')}`),
+      depth: 3,
+      ignored: (path) => path.includes(`${resolve(scopeDir, 'node_modules')}`),
       awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
     })
     watcher.on('all', (_event, path) => {
-      const rel = relative(real, path)
-      if (rel.startsWith('..') || rel.includes('node_modules')) return
-      if (rel === 'package.json') {
-        const next = readDependencyMap(real)
+      const rel = relative(scopeDir, path)
+      const [pkg, ...rest] = rel.split(/[\\/]/)
+      if (pkg === undefined || !pkgs.has(pkg)) return
+      const pluginName = `${scope}/${pkg}`
+      const restPath = rest.join('/')
+      if (restPath === 'package.json') {
+        const pkgRoot = resolve(scopeDir, pkg)
+        const next = readDependencyMap(pkgRoot)
         const previous = dependencySnapshots.get(pluginName)
         dependencySnapshots.set(pluginName, next)
         if (previous !== undefined && previous !== next) {
@@ -381,7 +399,7 @@ export async function startWatch(ctx: Context, config: Config): Promise<() => Pr
         return
       }
       // Code change: hot-reload the owning plugin.
-      if (/^lib[\\/]/.test(rel) || /^src[\\/]/.test(rel)) queueReload(pluginName)
+      if (/^lib[\\/]/.test(restPath) || /^src[\\/]/.test(restPath)) queueReload(pluginName)
     })
     watchers.push(watcher)
   }
