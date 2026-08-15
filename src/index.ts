@@ -24,7 +24,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, relative, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -179,10 +179,21 @@ export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ 
     return { ok: false, message: `cannot resolve "${pluginName}": ${renderError(error)}` }
   }
 
-  const job = Map.prototype.get.call(internal.loadCache, entryUrl)
+  // pnpm installs plugins behind symlinks; Node's ESM loadCache is keyed by
+  // the real path, so resolve the link before consulting it.
+  let realEntryUrl: string
+  try {
+    realEntryUrl = pathToFileURL(await realpath(fileURLToPath(entryUrl))).href
+    trace('real entry', realEntryUrl)
+  } catch (error) {
+    trace('realpath failed', renderError(error))
+    return { ok: false, message: `cannot resolve the real path of "${pluginName}": ${renderError(error)}` }
+  }
+
+  const job = Map.prototype.get.call(internal.loadCache, realEntryUrl)
   if (job === undefined || job.module === undefined) {
-    trace('not in module cache', entryUrl)
-    return { ok: false, message: `"${pluginName}" is not in the module cache (${entryUrl})` }
+    trace('not in module cache', realEntryUrl)
+    return { ok: false, message: `"${pluginName}" is not in the module cache (${realEntryUrl})` }
   }
   const plugin = loader.unwrapExports(job.module.getNamespace())
   if (plugin === undefined) {
@@ -190,20 +201,20 @@ export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ 
     return { ok: false, message: `cannot unwrap exports of "${pluginName}"` }
   }
 
-  const packageRoot = findPackageRoot(fileURLToPath(entryUrl))
+  const packageRoot = findPackageRoot(fileURLToPath(realEntryUrl))
   if (packageRoot === undefined) {
     trace('no package root')
     return { ok: false, message: `cannot find the package root of "${pluginName}"` }
   }
 
-  const urls = await collectPackageModules(internal, entryUrl, packageRoot)
+  const urls = await collectPackageModules(internal, realEntryUrl, packageRoot)
   trace('collecting modules', `${urls.size} urls`)
   const rollback = clearCaches(internal, urls)
 
   let fresh: Plugin | undefined
   try {
     trace('re-importing')
-    fresh = loader.unwrapExports(await loader.import(entryUrl, () => []))
+    fresh = loader.unwrapExports(await loader.import(realEntryUrl, () => []))
     trace('re-imported')
   } catch (error) {
     trace('re-import failed', renderError(error))
