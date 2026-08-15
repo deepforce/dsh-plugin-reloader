@@ -149,7 +149,9 @@ function clearCaches(internal: ModuleLoader, urls: Set<string>): () => void {
 /** Hot-reload one loaded plugin: clear caches, re-import, rebuild fibers, rollback on failure. */
 export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ ok: boolean; message: string }> {
   const trace = (step: string, detail?: string): void => {
-    ctx.logger.info('[plugin-reloader] reload "%s": %s%s', pluginName, step, detail === undefined ? '' : ` (${detail})`)
+    // warn, not info: the default dsh log level filters info lines, and these
+    // step diagnostics are exactly what a failed reload needs to show.
+    ctx.logger.warn('[plugin-reloader] reload "%s": %s%s', pluginName, step, detail === undefined ? '' : ` (${detail})`)
   }
 
   const loader = ctx.get('loader')
