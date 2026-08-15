@@ -8,12 +8,15 @@
  * node_modules exclusion. A `package.json` change that alters the dependency
  * tree exits with a dedicated code so an external supervisor restarts the
  * process (code alone cannot cover a dependency swap). A `/reload` command
- * triggers the same path manually.
+ * triggers the same path manually. Official `@deepseek-ai` plugins and plugins
+ * that provide services other plugins depend on are not reloadable by default
+ * (override with `allowOfficial` / `allowServiceProviders`); skipped attempts
+ * are counted in the watch diagnostics.
  *
  * @module @deepforce/dsh-plugin-reloader
  */
 
-import type { Context, Plugin } from '@deepseek-ai/cordis'
+import type { Context, Fiber, Plugin } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 // Type-only: merges ctx.loader and Fiber.entry; Loader / ModuleLoader types.
 import type { Loader, ModuleLoader } from '@deepseek-ai/cordis-plugin-loader'
@@ -48,6 +51,10 @@ export interface Config {
   pollIntervalMs?: number
   /** Exit code signalling the supervisor to restart (dependency-tree changes). */
   restartExitCode?: number
+  /** Allow hot-reloading official @deepseek-ai plugins (default false). */
+  allowOfficial?: boolean
+  /** Allow hot-reloading plugins that provide services other plugins depend on (default false). */
+  allowServiceProviders?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -56,15 +63,30 @@ export const Config: z<Config> = z.object({
   debounceMs: z.number().step(1).min(50).default(400),
   pollIntervalMs: z.number().step(1).min(200).default(2000),
   restartExitCode: z.number().step(1).min(0).max(255).default(DEFAULT_RESTART_EXIT_CODE),
+  allowOfficial: z.boolean().default(false),
+  allowServiceProviders: z.boolean().default(false),
 })
 
-function resolveConfig(config: Config) {
+/** Fully resolved config with every default applied. */
+export interface ResolvedConfig {
+  watchEnabled: boolean
+  watchRoots: string[]
+  debounceMs: number
+  pollIntervalMs: number
+  restartExitCode: number
+  allowOfficial: boolean
+  allowServiceProviders: boolean
+}
+
+function resolveConfig(config: Config): ResolvedConfig {
   return {
     watchEnabled: config.watchEnabled ?? true,
     watchRoots: config.watchRoots ?? ['@deepseek-ai', '@deepforce'],
     debounceMs: config.debounceMs ?? 400,
     pollIntervalMs: config.pollIntervalMs ?? 2000,
     restartExitCode: config.restartExitCode ?? DEFAULT_RESTART_EXIT_CODE,
+    allowOfficial: config.allowOfficial ?? false,
+    allowServiceProviders: config.allowServiceProviders ?? false,
   }
 }
 
@@ -151,8 +173,65 @@ function clearCaches(internal: ModuleLoader, urls: Set<string>): () => void {
   }
 }
 
+const OFFICIAL_SCOPE = '@deepseek-ai'
+
+/**
+ * Whether a loaded plugin provides services other plugins depend on. Detected
+ * by comparing the loader entry's fiber against the provider fiber recorded on
+ * every impl in the root reflect store: a plugin whose fiber owns any service
+ * impl is a dependency of whoever injects that service, so hot-reloading it
+ * would cascade restarts through the whole dependency graph.
+ */
+function providesServices(ctx: Context, pluginName: string): boolean {
+  const loader = ctx.get('loader')
+  if (loader === undefined) return false
+  const entry = [...loader.entries()].find((candidate) => candidate.options.name === pluginName)
+  const fiber = entry?.fiber
+  if (fiber === undefined) return false
+  // Impl is not exported from @deepseek-ai/cordis; assert the fiber field only.
+  return (Object.values(ctx.reflect.store) as Array<{ fiber?: Fiber }>).some((impl) => impl.fiber === fiber)
+}
+
+/** Whether hot-reloading a plugin is allowed under the resolved config. */
+export interface ReloadVerdict {
+  allowed: boolean
+  /** Why the plugin is not reloadable, when allowed is false. */
+  reason?: string
+  /** Short tag for list output ("official", "service", "self"). */
+  marker?: string
+}
+
+function reloadVerdict(ctx: Context, pluginName: string, resolved: ResolvedConfig): ReloadVerdict {
+  if (pluginName === name) {
+    return { allowed: false, reason: 'this plugin cannot reload itself', marker: 'self' }
+  }
+  if (!resolved.allowOfficial && pluginName.startsWith(`${OFFICIAL_SCOPE}/`)) {
+    return {
+      allowed: false,
+      reason: `official ${OFFICIAL_SCOPE} plugin; restart dsh web instead (or set allowOfficial: true)`,
+      marker: 'official',
+    }
+  }
+  if (!resolved.allowServiceProviders && providesServices(ctx, pluginName)) {
+    return {
+      allowed: false,
+      reason: 'provides services other plugins depend on; restart dsh web instead (or set allowServiceProviders: true)',
+      marker: 'service',
+    }
+  }
+  return { allowed: true }
+}
+
 /** Hot-reload one loaded plugin: clear caches, re-import, rebuild fibers, rollback on failure. */
-export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ ok: boolean; message: string }> {
+export async function reloadPlugin(
+  ctx: Context,
+  pluginName: string,
+  config: Config = {},
+): Promise<{ ok: boolean; message: string; skipped?: boolean }> {
+  const verdict = reloadVerdict(ctx, pluginName, resolveConfig(config))
+  if (!verdict.allowed) {
+    return { ok: false, message: `cannot hot-reload "${pluginName}": ${verdict.reason}`, skipped: true }
+  }
   const trace = (step: string, detail?: string): void => {
     // warn, not info: the default dsh log level filters info lines, and these
     // step diagnostics are exactly what a failed reload needs to show.
@@ -330,6 +409,10 @@ export interface WatchState {
   lastEvent?: string
   /** Successful hot reloads triggered by the watcher. */
   reloads: number
+  /** Reload attempts skipped because the plugin is not reloadable. */
+  skipped: number
+  /** Most recent skip as "plugin: reason". */
+  lastSkip?: string
   error?: string
 }
 
@@ -357,7 +440,7 @@ export interface WatchHandle {
 export async function startWatch(ctx: Context, config: Config): Promise<WatchHandle> {
   const loader = ctx.get('loader')
   const resolved = resolveConfig(config)
-  const state: WatchState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0 }
+  const state: WatchState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0, skipped: 0 }
   if (loader === undefined) {
     state.error = 'loader is unavailable'
     return { dispose: async () => {}, state }
@@ -365,11 +448,18 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
 
   const pending = new Map<string, NodeJS.Timeout>()
   const queueReload = (pluginName: string): void => {
+    const verdict = reloadVerdict(ctx, pluginName, resolved)
+    if (!verdict.allowed) {
+      state.skipped += 1
+      state.lastSkip = `${pluginName}: ${verdict.reason}`
+      ctx.logger.warn('[plugin-reloader] skipped reload of "%s": %s', pluginName, verdict.reason)
+      return
+    }
     const existing = pending.get(pluginName)
     if (existing) clearTimeout(existing)
     pending.set(pluginName, setTimeout(() => {
       pending.delete(pluginName)
-      void reloadPlugin(ctx, pluginName).then((result) => {
+      void reloadPlugin(ctx, pluginName, config).then((result) => {
         if (result.ok) state.reloads += 1
         ctx.logger.warn('[plugin-reloader] %s', result.message)
       })
@@ -517,13 +607,13 @@ export function apply(ctx: Context, config: Config): void {
           dispose = handle.dispose
         },
         (error: unknown) => {
-          liveState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0, error: renderError(error) }
+          liveState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0, skipped: 0, error: renderError(error) }
         },
       )
       return () => { void dispose?.() }
     }, 'plugin-reloader: watch')
   } else {
-    liveState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0, error: 'watchEnabled is false' }
+    liveState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0, skipped: 0, error: 'watchEnabled is false' }
   }
 
   ctx.effect(function* () {
@@ -541,12 +631,16 @@ export function apply(ctx: Context, config: Config): void {
           const names = loader === undefined
             ? []
             : [...loader.entries()].map((entry) => entry.options.name).filter((n) => n.startsWith('@'))
+          const rows = names.map((pluginName) => {
+            const verdict = reloadVerdict(ctx, pluginName, resolved)
+            return verdict.allowed ? `  ${pluginName}` : `  ${pluginName} [${verdict.marker}]`
+          })
           return {
             kind: 'success',
-            text: `usage: /reload <plugin>\nloaded plugins:\n  ${names.join('\n  ')}`,
+            text: `usage: /reload <plugin>\nloaded plugins:\n${rows.join('\n')}`,
           }
         }
-        const result = await reloadPlugin(ctx, target)
+        const result = await reloadPlugin(ctx, target, config)
         return result.ok
           ? { kind: 'success', text: result.message }
           : { kind: 'error', text: result.message }
@@ -556,7 +650,7 @@ export function apply(ctx: Context, config: Config): void {
       name: 'watch-status',
       description: 'Show plugin-reloader watch status',
       handler: (): CommandResult => {
-        const s = liveState ?? { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0 }
+        const s = liveState ?? { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0, skipped: 0 }
         return {
           kind: 'success',
           text: JSON.stringify({
@@ -568,6 +662,8 @@ export function apply(ctx: Context, config: Config): void {
             events: s.events,
             lastEvent: s.lastEvent,
             reloads: s.reloads,
+            skipped: s.skipped,
+            lastSkip: s.lastSkip,
             error: s.error,
           }, null, 2),
         }

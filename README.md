@@ -23,13 +23,21 @@ without any special flag.
   next tick). Plugin upgrades are low-frequency, so a 2-second stat of a handful of files is
   negligible.
 - **`/reload <plugin>` command** — manually hot-reload one installed plugin; with no
-  argument it lists the loadable plugins.
+  argument it lists the loaded plugins, marking non-reloadable ones (`[official]`,
+  `[service]`, `[self]`).
 - **`/watch-status` command** — prints live watch diagnostics: watched scopes, event count,
-  the last observed change, reload count, and any startup error. Read it after upgrading a
-  plugin to confirm the auto-reload fired (`events` and `reloads` incremented).
+  the last observed change, reload count, skipped reloads, and any startup error. Read it
+  after upgrading a plugin to confirm the auto-reload fired (`events` and `reloads`
+  incremented).
 - **Dependency-change restart** — if a plugin's `package.json` changes its
   `dependencies`/`peerDependencies`, the process exits with code `42` (configurable) so a
   supervisor relaunches it.
+- **Reloadability guard** — official `@deepseek-ai` plugins and plugins that provide
+  services other plugins depend on are **not** hot-reloaded by default: the attempt is
+  skipped, logged, and counted in `/watch-status`. Reloading a service provider would
+  cascade restarts through every plugin that injects its services, and reloading an
+  official plugin is equivalent to patching dsh itself mid-session. Override per category
+  with `allowOfficial` / `allowServiceProviders`.
 - **Rollback on failure** — a failed re-import or mount restores the module caches and the
   previous plugin; the session keeps running.
 
@@ -75,6 +83,8 @@ just exits).
 | `debounceMs` | `400` | Change coalescing window before a reload fires |
 | `pollIntervalMs` | `2000` | Polling interval for change detection |
 | `restartExitCode` | `42` | Exit code used when a dependency tree changed (supervisor restarts on it) |
+| `allowOfficial` | `false` | Also hot-reload official `@deepseek-ai` plugins (not recommended) |
+| `allowServiceProviders` | `false` | Also hot-reload plugins that provide services other plugins depend on (not recommended) |
 
 Example overlay:
 

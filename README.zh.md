@@ -9,9 +9,10 @@
 ## 功能
 
 - **自动热重载** — 按 `pollIntervalMs`（默认 2 秒）轮询已安装插件的入口文件和 `package.json`，代码变化时就地热重载该插件。轮询（`stat` mtime+size）取代文件监听库：chokidar 的 fs-watch 在常驻的 dsh web 进程（Windows）里永远无法 ready，且轮询天然免疫 pnpm 的整目录替换（下一次轮询直接看到新文件）。插件升级是低频操作，每 2 秒 stat 几个文件开销可忽略。
-- **`/reload <插件>` 命令** — 手动热重载一个已安装插件；不带参数时列出可重载的插件。
-- **`/watch-status` 命令** — 打印实时监听诊断：监听的 scope、事件计数、最近一次变化、重载计数、启动错误。升级插件后敲它，可确认自动重载已触发（`events` 与 `reloads` 递增）。
+- **`/reload <插件>` 命令** — 手动热重载一个已安装插件；不带参数时列出已加载插件，并标记不可重载者（`[official]`、`[service]`、`[self]`）。
+- **`/watch-status` 命令** — 打印实时监听诊断：监听的 scope、事件计数、最近一次变化、重载计数、被跳过的重载、启动错误。升级插件后敲它，可确认自动重载已触发（`events` 与 `reloads` 递增）。
 - **依赖变化自动重启** — 若某插件的 `package.json` 改变了 `dependencies`/`peerDependencies`，进程以退出码 `42`（可配置）退出，由 supervisor 重新拉起。
+- **可重载性守卫** — 官方 `@deepseek-ai` 插件与「提供其他插件依赖的服务」的插件**默认不**热重载：尝试会被跳过、记入日志并在 `/watch-status` 中计数。重载服务提供者会让所有注入该服务的插件连锁重启；重载官方插件则相当于在会话中途给 dsh 本体打补丁。可用 `allowOfficial` / `allowServiceProviders` 分别放开。
 - **失败回滚** — 重新导入或挂载失败时恢复模块缓存和旧插件，会话继续运行。
 
 ## 安装
@@ -51,6 +52,8 @@ dsh plugin --profile web add github:deepforce/dsh-balance   # 升级
 | `debounceMs` | `400` | 触发重载前的变化合并窗口（毫秒） |
 | `pollIntervalMs` | `2000` | 变化检测的轮询间隔（毫秒） |
 | `restartExitCode` | `42` | 依赖树变化时的退出码（supervisor 据此重启） |
+| `allowOfficial` | `false` | 是否也热重载官方 `@deepseek-ai` 插件（不建议） |
+| `allowServiceProviders` | `false` | 是否也热重载提供其他插件所依赖服务的插件（不建议） |
 
 覆盖示例：
 

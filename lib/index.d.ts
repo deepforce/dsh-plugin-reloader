@@ -8,7 +8,10 @@
  * node_modules exclusion. A `package.json` change that alters the dependency
  * tree exits with a dedicated code so an external supervisor restarts the
  * process (code alone cannot cover a dependency swap). A `/reload` command
- * triggers the same path manually.
+ * triggers the same path manually. Official `@deepseek-ai` plugins and plugins
+ * that provide services other plugins depend on are not reloadable by default
+ * (override with `allowOfficial` / `allowServiceProviders`); skipped attempts
+ * are counted in the watch diagnostics.
  *
  * @module @deepforce/dsh-plugin-reloader
  */
@@ -33,12 +36,35 @@ export interface Config {
     pollIntervalMs?: number;
     /** Exit code signalling the supervisor to restart (dependency-tree changes). */
     restartExitCode?: number;
+    /** Allow hot-reloading official @deepseek-ai plugins (default false). */
+    allowOfficial?: boolean;
+    /** Allow hot-reloading plugins that provide services other plugins depend on (default false). */
+    allowServiceProviders?: boolean;
 }
 export declare const Config: z<Config>;
+/** Fully resolved config with every default applied. */
+export interface ResolvedConfig {
+    watchEnabled: boolean;
+    watchRoots: string[];
+    debounceMs: number;
+    pollIntervalMs: number;
+    restartExitCode: number;
+    allowOfficial: boolean;
+    allowServiceProviders: boolean;
+}
+/** Whether hot-reloading a plugin is allowed under the resolved config. */
+export interface ReloadVerdict {
+    allowed: boolean;
+    /** Why the plugin is not reloadable, when allowed is false. */
+    reason?: string;
+    /** Short tag for list output ("official", "service", "self"). */
+    marker?: string;
+}
 /** Hot-reload one loaded plugin: clear caches, re-import, rebuild fibers, rollback on failure. */
-export declare function reloadPlugin(ctx: Context, pluginName: string): Promise<{
+export declare function reloadPlugin(ctx: Context, pluginName: string, config?: Config): Promise<{
     ok: boolean;
     message: string;
+    skipped?: boolean;
 }>;
 /** One watched scope directory and the packages under it. */
 export interface WatchScope {
@@ -60,6 +86,10 @@ export interface WatchState {
     lastEvent?: string;
     /** Successful hot reloads triggered by the watcher. */
     reloads: number;
+    /** Reload attempts skipped because the plugin is not reloadable. */
+    skipped: number;
+    /** Most recent skip as "plugin: reason". */
+    lastSkip?: string;
     error?: string;
 }
 /** Result of starting the watcher: the disposer plus live diagnostics. */
