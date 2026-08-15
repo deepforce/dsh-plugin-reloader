@@ -193,6 +193,15 @@ export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ 
   const job = Map.prototype.get.call(internal.loadCache, realEntryUrl)
   if (job === undefined || job.module === undefined) {
     trace('not in module cache', realEntryUrl)
+    // Diagnostic: enumerate any cache keys that mention this plugin so a
+    // mismatched loading URL is visible in the log.
+    const fragment = pluginName.replace('@', '').replace('/', '-')
+    const similar: string[] = []
+    for (const key of internal.loadCache.keys()) {
+      const text = String(key)
+      if (text.includes(fragment)) similar.push(text)
+    }
+    trace('similar cache keys', similar.length > 0 ? similar.join(' | ') : '(none)')
     return { ok: false, message: `"${pluginName}" is not in the module cache (${realEntryUrl})` }
   }
   const plugin = loader.unwrapExports(job.module.getNamespace())
