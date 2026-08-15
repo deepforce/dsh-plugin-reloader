@@ -148,66 +148,86 @@ function clearCaches(internal: ModuleLoader, urls: Set<string>): () => void {
 
 /** Hot-reload one loaded plugin: clear caches, re-import, rebuild fibers, rollback on failure. */
 export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ ok: boolean; message: string }> {
+  const trace = (step: string, detail?: string): void => {
+    ctx.logger.info('[plugin-reloader] reload "%s": %s%s', pluginName, step, detail === undefined ? '' : ` (${detail})`)
+  }
+
   const loader = ctx.get('loader')
   if (loader === undefined || loader.internal === undefined) {
+    trace('loader internal unavailable')
     return { ok: false, message: 'loader internal is unavailable' }
   }
   const internal = loader.internal
 
   const entry = [...loader.entries()].find((candidate) => candidate.options.name === pluginName)
   if (entry === undefined) {
+    trace('no loader entry')
     return { ok: false, message: `no loader entry named "${pluginName}"` }
   }
   const baseUrl = entry.parent.tree.ctx.baseUrl
   if (baseUrl === undefined) {
+    trace('no base URL')
     return { ok: false, message: `entry "${pluginName}" has no base URL` }
   }
 
   let entryUrl: string
   try {
     entryUrl = await resolveUrl(internal, pluginName, baseUrl)
+    trace('resolved entry', entryUrl)
   } catch (error) {
+    trace('resolve failed', renderError(error))
     return { ok: false, message: `cannot resolve "${pluginName}": ${renderError(error)}` }
   }
 
   const job = Map.prototype.get.call(internal.loadCache, entryUrl)
   if (job === undefined || job.module === undefined) {
+    trace('not in module cache', entryUrl)
     return { ok: false, message: `"${pluginName}" is not in the module cache (${entryUrl})` }
   }
   const plugin = loader.unwrapExports(job.module.getNamespace())
   if (plugin === undefined) {
+    trace('unwrap failed')
     return { ok: false, message: `cannot unwrap exports of "${pluginName}"` }
   }
 
   const packageRoot = findPackageRoot(fileURLToPath(entryUrl))
   if (packageRoot === undefined) {
+    trace('no package root')
     return { ok: false, message: `cannot find the package root of "${pluginName}"` }
   }
 
   const urls = await collectPackageModules(internal, entryUrl, packageRoot)
+  trace('collecting modules', `${urls.size} urls`)
   const rollback = clearCaches(internal, urls)
 
   let fresh: Plugin | undefined
   try {
+    trace('re-importing')
     fresh = loader.unwrapExports(await loader.import(entryUrl, () => []))
+    trace('re-imported')
   } catch (error) {
+    trace('re-import failed', renderError(error))
     rollback()
     return { ok: false, message: `re-import of "${pluginName}" failed: ${renderError(error)}` }
   }
   if (fresh === undefined) {
+    trace('re-import produced no plugin')
     rollback()
     return { ok: false, message: `re-import of "${pluginName}" produced no plugin` }
   }
 
   const runtime = ctx.registry.get(plugin)
   if (runtime === undefined) {
+    trace('no live runtime')
     rollback()
     return { ok: false, message: `"${pluginName}" has no live fiber` }
   }
   // Snapshot the fibers BEFORE disposing: disposal removes them from the
   // runtime list asynchronously, and each rebuilt fiber needs its own config.
   const fibers = [...runtime.fibers]
+  trace('fibers', String(fibers.length))
   if (fibers.length === 0) {
+    trace('no live fiber')
     rollback()
     return { ok: false, message: `"${pluginName}" has no live fiber` }
   }
@@ -221,11 +241,15 @@ export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ 
   }
 
   try {
+    trace('disposing old fibers')
     ctx.registry.delete(plugin)
+    trace('mounting fresh plugin')
     mount(fresh, () => [])
+    trace('done')
     return { ok: true, message: `reloaded "${pluginName}" (${urls.size} modules)` }
   } catch (error) {
     // Roll back: restore caches and re-mount the previous plugin.
+    trace('mount failed, rolling back', renderError(error))
     rollback()
     try {
       ctx.registry.delete(fresh)
