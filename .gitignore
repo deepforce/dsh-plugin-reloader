@@ -1,0 +1,4 @@
+node_modules/
+*.tsbuildinfo
+# lib/ is committed on purpose: the plugin is installed from git or npm without
+# a build step, so the compiled entry (main: lib/index.js) must ship.
