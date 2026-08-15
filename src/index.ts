@@ -195,9 +195,10 @@ export async function reloadPlugin(ctx: Context, pluginName: string): Promise<{ 
   const job = Map.prototype.get.call(internal.loadCache, realEntryUrl)
   if (job === undefined || job.module === undefined) {
     trace('not in module cache', realEntryUrl)
-    // Diagnostic: enumerate any cache keys that mention this plugin so a
-    // mismatched loading URL is visible in the log.
-    const fragment = pluginName.replace('@', '').replace('/', '-')
+    // Diagnostic: enumerate any cache keys that mention this plugin. Use the
+    // package basename ("dsh-balance") — cache URL keys keep the scoped form
+    // "@deepforce/dsh-balance", so an @-stripped fragment would never match.
+    const fragment = pluginName.slice(pluginName.indexOf('/') + 1)
     const similar: string[] = []
     for (const key of internal.loadCache.keys()) {
       const text = String(key)
