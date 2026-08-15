@@ -29,6 +29,8 @@ export interface Config {
     watchRoots?: string[];
     /** Change coalescing window in milliseconds (default 400). */
     debounceMs?: number;
+    /** Polling interval in milliseconds for change detection (default 2000). */
+    pollIntervalMs?: number;
     /** Exit code signalling the supervisor to restart (dependency-tree changes). */
     restartExitCode?: number;
 }
@@ -66,15 +68,16 @@ export interface WatchHandle {
     state: WatchState;
 }
 /**
- * Watch the loaded plugins through their scope directories. Code changes
- * hot-reload the owning plugin; a dependency-map change exits with the
- * restart code so an external supervisor can relaunch the process.
+ * Watch the loaded plugins by polling their entry and package.json files.
+ * Code changes hot-reload the owning plugin; a dependency-map change exits
+ * with the restart code so an external supervisor can relaunch the process.
  *
- * The watcher watches each scope directory (node_modules/@deepseek-ai,
- * node_modules/@deepforce) rather than the plugin directories themselves:
- * pnpm upgrades replace a plugin directory wholesale (delete + recreate), which
- * would detach a watcher rooted inside it. Watching the parent scope keeps the
- * replacement visible as add/unlink events under the same watcher.
+ * Polling (stat mtime+size) replaces chokidar: in a long-lived dsh web process
+ * the chokidar watcher on the scope directory never reached ready on Windows
+ * (its initial scan hung), so file-change events never fired. Polling is also
+ * immune to pnpm's whole-directory replacement, since the stat simply sees the
+ * new files on the next tick. Plugin upgrades are low-frequency, so a 2-second
+ * stat of a handful of files is negligible.
  * @param ctx - plugin context.
  * @param config - resolved plugin config.
  * @returns the disposer plus a live {@link WatchState} diagnostics object.

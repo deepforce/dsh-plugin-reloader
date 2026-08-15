@@ -18,12 +18,10 @@ import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands
 // Type-only: merges ctx.loader and Fiber.entry; Loader / ModuleLoader types.
 import type { Loader, ModuleLoader } from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
-import type { FSWatcher } from 'chokidar'
-import { watch } from 'chokidar'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { dirname, relative, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
@@ -46,6 +44,8 @@ export interface Config {
   watchRoots?: string[]
   /** Change coalescing window in milliseconds (default 400). */
   debounceMs?: number
+  /** Polling interval in milliseconds for change detection (default 2000). */
+  pollIntervalMs?: number
   /** Exit code signalling the supervisor to restart (dependency-tree changes). */
   restartExitCode?: number
 }
@@ -54,6 +54,7 @@ export const Config: z<Config> = z.object({
   watchEnabled: z.boolean().default(true),
   watchRoots: z.array(z.string()).default(['@deepseek-ai', '@deepforce']),
   debounceMs: z.number().step(1).min(50).default(400),
+  pollIntervalMs: z.number().step(1).min(200).default(2000),
   restartExitCode: z.number().step(1).min(0).max(255).default(DEFAULT_RESTART_EXIT_CODE),
 })
 
@@ -62,6 +63,7 @@ function resolveConfig(config: Config) {
     watchEnabled: config.watchEnabled ?? true,
     watchRoots: config.watchRoots ?? ['@deepseek-ai', '@deepforce'],
     debounceMs: config.debounceMs ?? 400,
+    pollIntervalMs: config.pollIntervalMs ?? 2000,
     restartExitCode: config.restartExitCode ?? DEFAULT_RESTART_EXIT_CODE,
   }
 }
@@ -338,15 +340,16 @@ export interface WatchHandle {
 }
 
 /**
- * Watch the loaded plugins through their scope directories. Code changes
- * hot-reload the owning plugin; a dependency-map change exits with the
- * restart code so an external supervisor can relaunch the process.
+ * Watch the loaded plugins by polling their entry and package.json files.
+ * Code changes hot-reload the owning plugin; a dependency-map change exits
+ * with the restart code so an external supervisor can relaunch the process.
  *
- * The watcher watches each scope directory (node_modules/@deepseek-ai,
- * node_modules/@deepforce) rather than the plugin directories themselves:
- * pnpm upgrades replace a plugin directory wholesale (delete + recreate), which
- * would detach a watcher rooted inside it. Watching the parent scope keeps the
- * replacement visible as add/unlink events under the same watcher.
+ * Polling (stat mtime+size) replaces chokidar: in a long-lived dsh web process
+ * the chokidar watcher on the scope directory never reached ready on Windows
+ * (its initial scan hung), so file-change events never fired. Polling is also
+ * immune to pnpm's whole-directory replacement, since the stat simply sees the
+ * new files on the next tick. Plugin upgrades are low-frequency, so a 2-second
+ * stat of a handful of files is negligible.
  * @param ctx - plugin context.
  * @param config - resolved plugin config.
  * @returns the disposer plus a live {@link WatchState} diagnostics object.
@@ -355,12 +358,11 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
   const loader = ctx.get('loader')
   const resolved = resolveConfig(config)
   const state: WatchState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0 }
-  if (loader === undefined || loader.internal === undefined) {
-    state.error = 'loader internal is unavailable'
+  if (loader === undefined) {
+    state.error = 'loader is unavailable'
     return { dispose: async () => {}, state }
   }
 
-  const watchers: FSWatcher[] = []
   const pending = new Map<string, NodeJS.Timeout>()
   const queueReload = (pluginName: string): void => {
     const existing = pending.get(pluginName)
@@ -401,6 +403,15 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
     return { dispose: async () => {}, state }
   }
 
+  /** One polled target: the plugin's entry file and its package.json. */
+  interface PollTarget {
+    pluginName: string
+    entry: string
+    pkgJson: string
+    entrySig?: string
+    pkgSig?: string
+  }
+  const targets: PollTarget[] = []
   for (const [scope, pkgs] of byScope) {
     const scopeDir = resolve(modulesDir, scope)
     if (!existsSync(scopeDir)) {
@@ -409,54 +420,72 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
     }
     state.scopes.push({ dir: scopeDir, packages: [...pkgs] })
     for (const pkg of pkgs) {
-      dependencySnapshots.set(`${scope}/${pkg}`, readDependencyMap(resolve(scopeDir, pkg)))
-    }
-
-    const watcher = watch(scopeDir, {
-      ignoreInitial: true,
-      depth: 3,
-      ignored: (path) => path.includes(`${resolve(scopeDir, 'node_modules')}`),
-      awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
-    })
-    const readyWatchers = new Set<FSWatcher>()
-    watcher.on('ready', () => {
-      readyWatchers.add(watcher)
-      state.watcherReady = watchers.every((candidate) => readyWatchers.has(candidate))
-    })
-    watcher.on('error', (error: unknown) => {
-      if (state.watcherError === undefined) state.watcherError = renderError(error)
-    })
-    watcher.on('all', (event, path) => {
-      const rel = relative(scopeDir, path)
-      state.events += 1
-      state.lastEvent = `${event} ${rel}`
-      const [pkg, ...rest] = rel.split(/[\\/]/)
-      if (pkg === undefined || !pkgs.has(pkg)) return
       const pluginName = `${scope}/${pkg}`
-      const restPath = rest.join('/')
-      if (restPath === 'package.json') {
-        const pkgRoot = resolve(scopeDir, pkg)
-        const next = readDependencyMap(pkgRoot)
-        const previous = dependencySnapshots.get(pluginName)
-        dependencySnapshots.set(pluginName, next)
-        if (previous !== undefined && previous !== next) {
-          ctx.logger.warn(
-            `[plugin-reloader] "${pluginName}" changed its dependency tree; exiting ${resolved.restartExitCode} for the supervisor to restart`,
-          )
-          process.exit(resolved.restartExitCode)
+      const dir = resolve(scopeDir, pkg)
+      const pkgJson = resolve(dir, 'package.json')
+      let entry = resolve(dir, 'lib/index.js')
+      try {
+        const manifest = JSON.parse(readFileSync(pkgJson, 'utf8')) as { main?: string }
+        if (typeof manifest.main === 'string' && manifest.main !== '') {
+          entry = resolve(dir, manifest.main)
         }
-        return
+      } catch {
+        // Unreadable manifest; fall back to the default entry.
       }
-      // Code change: hot-reload the owning plugin.
-      if (/^lib[\\/]/.test(restPath) || /^src[\\/]/.test(restPath)) queueReload(pluginName)
-    })
-    watchers.push(watcher)
+      targets.push({ pluginName, entry, pkgJson })
+      dependencySnapshots.set(pluginName, readDependencyMap(dir))
+    }
   }
 
-  state.started = watchers.length > 0
+  /** One poll pass: record signatures, detect changes, act. */
+  const tick = (): void => {
+    for (const target of targets) {
+      try {
+        const entryStat = statSync(target.entry)
+        const entrySig = `${entryStat.mtimeMs}:${entryStat.size}`
+        if (target.entrySig !== undefined && target.entrySig !== entrySig) {
+          state.events += 1
+          state.lastEvent = `change ${target.entry}`
+          queueReload(target.pluginName)
+        }
+        target.entrySig = entrySig
+      } catch {
+        // Entry temporarily invisible (mid-replacement); drop the signature so
+        // the new file registers as a change on a later tick.
+        target.entrySig = undefined
+      }
+      try {
+        const pkgStat = statSync(target.pkgJson)
+        const pkgSig = `${pkgStat.mtimeMs}:${pkgStat.size}`
+        if (target.pkgSig !== undefined && target.pkgSig !== pkgSig) {
+          const next = readDependencyMap(dirname(target.pkgJson))
+          const previous = dependencySnapshots.get(target.pluginName)
+          dependencySnapshots.set(target.pluginName, next)
+          if (previous !== undefined && previous !== next) {
+            ctx.logger.warn(
+              `[plugin-reloader] "${target.pluginName}" changed its dependency tree; `
+              + `exiting ${resolved.restartExitCode} for the supervisor to restart`,
+            )
+            process.exit(resolved.restartExitCode)
+          }
+          state.events += 1
+          state.lastEvent = `change ${target.pkgJson}`
+          queueReload(target.pluginName)
+        }
+        target.pkgSig = pkgSig
+      } catch {
+        target.pkgSig = undefined
+      }
+    }
+  }
+
+  tick() // Establish baseline signatures without acting.
+  const timer = setInterval(tick, resolved.pollIntervalMs)
+  state.started = targets.length > 0
+  state.watcherReady = true
   return {
     dispose: async () => {
-      for (const watcher of watchers) await watcher.close()
+      clearInterval(timer)
       for (const timer of pending.values()) clearTimeout(timer)
       pending.clear()
     },
