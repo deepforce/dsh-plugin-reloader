@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "@deepforce/dsh-plugin-reloader",
     "description":  "Hot-reload installed DeepSeek Harness plugins without restarting dsh web: watches plugin bundles, reloads changed plugins in place, and restarts on dependency changes",
     "version":  "0.1.0",
