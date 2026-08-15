@@ -48,6 +48,10 @@ export interface WatchState {
     started: boolean;
     modulesDir?: string;
     scopes: WatchScope[];
+    /** Whether every chokidar watcher reached its ready state. */
+    watcherReady: boolean;
+    /** First watcher error, if any. */
+    watcherError?: string;
     /** Total filesystem events observed by the watchers. */
     events: number;
     /** The most recent event as "kind path". */

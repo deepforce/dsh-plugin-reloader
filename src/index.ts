@@ -318,6 +318,10 @@ export interface WatchState {
   started: boolean
   modulesDir?: string
   scopes: WatchScope[]
+  /** Whether every chokidar watcher reached its ready state. */
+  watcherReady: boolean
+  /** First watcher error, if any. */
+  watcherError?: string
   /** Total filesystem events observed by the watchers. */
   events: number
   /** The most recent event as "kind path". */
@@ -350,7 +354,7 @@ export interface WatchHandle {
 export async function startWatch(ctx: Context, config: Config): Promise<WatchHandle> {
   const loader = ctx.get('loader')
   const resolved = resolveConfig(config)
-  const state: WatchState = { started: false, scopes: [], events: 0, reloads: 0 }
+  const state: WatchState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0 }
   if (loader === undefined || loader.internal === undefined) {
     state.error = 'loader internal is unavailable'
     return { dispose: async () => {}, state }
@@ -414,6 +418,14 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
       ignored: (path) => path.includes(`${resolve(scopeDir, 'node_modules')}`),
       awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
     })
+    const readyWatchers = new Set<FSWatcher>()
+    watcher.on('ready', () => {
+      readyWatchers.add(watcher)
+      state.watcherReady = watchers.every((candidate) => readyWatchers.has(candidate))
+    })
+    watcher.on('error', (error: unknown) => {
+      if (state.watcherError === undefined) state.watcherError = renderError(error)
+    })
     watcher.on('all', (event, path) => {
       const rel = relative(scopeDir, path)
       state.events += 1
@@ -459,7 +471,7 @@ export async function startWatch(ctx: Context, config: Config): Promise<WatchHan
  */
 export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
-  const watchState: WatchState = { started: false, scopes: [], events: 0, reloads: 0 }
+  const watchState: WatchState = { started: false, scopes: [], watcherReady: false, events: 0, reloads: 0 }
 
   if (resolved.watchEnabled) {
     ctx.effect(() => {
@@ -517,6 +529,8 @@ export function apply(ctx: Context, config: Config): void {
           started: watchState.started,
           modulesDir: watchState.modulesDir,
           scopes: watchState.scopes,
+          watcherReady: watchState.watcherReady,
+          watcherError: watchState.watcherError,
           events: watchState.events,
           lastEvent: watchState.lastEvent,
           reloads: watchState.reloads,
