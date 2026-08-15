@@ -15,11 +15,18 @@ without any special flag.
 
 ## Features
 
-- **Auto hot-reload** — watches the real package directories (pnpm symlinks resolved) of the
-  loaded `@deepseek-ai/*` and `@deepforce/*` plugins; a change under `lib/` or `src/`
-  hot-reloads that plugin (debounced).
+- **Auto hot-reload** — polls the installed plugins' entry and `package.json` files (every
+  `pollIntervalMs`, default 2s) and hot-reloads a plugin in place when its code changes.
+  Polling (`stat` mtime+size) is used instead of a file-watcher library: chokidar's fs-watch
+  never reached ready inside the long-lived dsh web process on Windows, and polling is
+  immune to pnpm's whole-directory replacements (the stat simply sees the new files on the
+  next tick). Plugin upgrades are low-frequency, so a 2-second stat of a handful of files is
+  negligible.
 - **`/reload <plugin>` command** — manually hot-reload one installed plugin; with no
   argument it lists the loadable plugins.
+- **`/watch-status` command** — prints live watch diagnostics: watched scopes, event count,
+  the last observed change, reload count, and any startup error. Read it after upgrading a
+  plugin to confirm the auto-reload fired (`events` and `reloads` incremented).
 - **Dependency-change restart** — if a plugin's `package.json` changes its
   `dependencies`/`peerDependencies`, the process exits with code `42` (configurable) so a
   supervisor relaunches it.
@@ -63,9 +70,10 @@ just exits).
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `watchEnabled` | `true` | Watch loaded plugins and hot-reload on code changes |
+| `watchEnabled` | `true` | Poll installed plugins and hot-reload on code changes |
 | `watchRoots` | `["@deepseek-ai", "@deepforce"]` | Scoped directories under the profile's `node_modules` to consider |
-| `debounceMs` | `400` | File-change coalescing window |
+| `debounceMs` | `400` | Change coalescing window before a reload fires |
+| `pollIntervalMs` | `2000` | Polling interval for change detection |
 | `restartExitCode` | `42` | Exit code used when a dependency tree changed (supervisor restarts on it) |
 
 Example overlay:

@@ -8,8 +8,9 @@
 
 ## 功能
 
-- **自动热重载** — 监听已加载的 `@deepseek-ai/*` 与 `@deepforce/*` 插件的真实包目录（解析 pnpm 符号链接）；`lib/` 或 `src/` 下文件变化时自动热重载对应插件（带防抖）。
+- **自动热重载** — 按 `pollIntervalMs`（默认 2 秒）轮询已安装插件的入口文件和 `package.json`，代码变化时就地热重载该插件。轮询（`stat` mtime+size）取代文件监听库：chokidar 的 fs-watch 在常驻的 dsh web 进程（Windows）里永远无法 ready，且轮询天然免疫 pnpm 的整目录替换（下一次轮询直接看到新文件）。插件升级是低频操作，每 2 秒 stat 几个文件开销可忽略。
 - **`/reload <插件>` 命令** — 手动热重载一个已安装插件；不带参数时列出可重载的插件。
+- **`/watch-status` 命令** — 打印实时监听诊断：监听的 scope、事件计数、最近一次变化、重载计数、启动错误。升级插件后敲它，可确认自动重载已触发（`events` 与 `reloads` 递增）。
 - **依赖变化自动重启** — 若某插件的 `package.json` 改变了 `dependencies`/`peerDependencies`，进程以退出码 `42`（可配置）退出，由 supervisor 重新拉起。
 - **失败回滚** — 重新导入或挂载失败时恢复模块缓存和旧插件，会话继续运行。
 
@@ -47,7 +48,8 @@ dsh plugin --profile web add github:deepforce/dsh-balance   # 升级
 | --- | --- | --- |
 | `watchEnabled` | `true` | 是否监听已加载插件并在代码变化时热重载 |
 | `watchRoots` | `["@deepseek-ai", "@deepforce"]` | profile 的 `node_modules` 下要考虑的 scope 目录 |
-| `debounceMs` | `400` | 文件变化合并窗口（毫秒） |
+| `debounceMs` | `400` | 触发重载前的变化合并窗口（毫秒） |
+| `pollIntervalMs` | `2000` | 变化检测的轮询间隔（毫秒） |
 | `restartExitCode` | `42` | 依赖树变化时的退出码（supervisor 据此重启） |
 
 覆盖示例：
