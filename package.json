@@ -1,7 +1,7 @@
 {
     "name":  "@deepforce/dsh-plugin-reloader",
     "description":  "Hot-reload installed DeepSeek Harness plugins without restarting dsh web: watches plugin bundles, reloads changed plugins in place, and restarts on dependency changes",
-    "version":  "0.2.0",
+    "version":  "0.3.0",
     "publishConfig":  {
                           "access":  "public"
                       },
@@ -38,15 +38,15 @@
 
                      },
     "peerDependencies":  {
-                             "@deepseek-ai/cordis":  "^4.0.1",
-                             "@deepseek-ai/cordis-plugin-loader":  "^1.0.2",
-                             "@deepseek-ai/dsh-commands":  "^0.0.1-rc.1",
+                             "@deepseek-ai/cordis":  "~4.0.4",
+                             "@deepseek-ai/cordis-plugin-loader":  "~1.0.5",
+                             "@deepseek-ai/dsh-commands":  "^0.2.0-rc.2",
                              "@deepseek-ai/schemastery":  "^3.18.1"
                          },
     "devDependencies":  {
-                            "@deepseek-ai/cordis":  "^4.0.1",
-                            "@deepseek-ai/cordis-plugin-loader":  "^1.0.2",
-                            "@deepseek-ai/dsh-commands":  "^0.0.1-rc.1",
+                            "@deepseek-ai/cordis":  "~4.0.4",
+                            "@deepseek-ai/cordis-plugin-loader":  "~1.0.5",
+                            "@deepseek-ai/dsh-commands":  "0.2.0-rc.2",
                             "@deepseek-ai/schemastery":  "^3.18.1",
                             "@types/node":  "^26.2.0",
                             "typescript":  "^5.7.0"
