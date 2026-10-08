@@ -99,10 +99,13 @@ Example overlay:
 
 ## Compatibility
 
-Tested against DeepSeek Harness `0.1.0-rc.6` (web profile, Windows 11, Node 24). It depends
-on the loader's internal module cache (`loader.internal`), which the vendored loader exposes
-by default; if a future dsh removes that surface, the plugin degrades to `/reload` reporting
-"loader internal is unavailable".
+Tested against DeepSeek Harness `0.2.0-rc.2` (web profile, Windows 11, Node 24) and earlier
+`0.1.0-rc.x` builds. It depends on the loader's internal module cache (`loader.internal`), which
+the vendored loader exposes by default; if a future dsh removes that surface, the plugin degrades
+to `/reload` reporting "loader internal is unavailable". Version `0.3.0` requires dsh `0.2.x`:
+`0.2.0` and earlier pin `dsh-commands` to `^0.0.1-rc.1`, which — caret on a `0.0.x` version being
+an exact-version constraint — matches no later build, so dsh's plugin compatibility gate skipped
+the plugin entirely.
 
 ## Security
 

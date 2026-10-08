@@ -68,7 +68,7 @@ dsh plugin --profile web add github:deepforce/dsh-balance   # 升级
 
 ## 兼容性
 
-已在 DeepSeek Harness `0.1.0-rc.6`（web profile，Windows 11，Node 24）上验证。它依赖 loader 的内部模块缓存（`loader.internal`），vendored loader 默认暴露；若未来 dsh 移除该接口，插件会降级为 `/reload` 报告「loader internal is unavailable」。
+已在 DeepSeek Harness `0.2.0-rc.2`（web profile，Windows 11，Node 24）及更早的 `0.1.0-rc.x` 上验证。它依赖 loader 的内部模块缓存（`loader.internal`），vendored loader 默认暴露；若未来 dsh 移除该接口，插件会降级为 `/reload` 报告「loader internal is unavailable」。`0.3.0` 起要求 dsh `0.2.x`：`0.2.0` 及更早版本把 `dsh-commands` 锁在 `^0.0.1-rc.1`，而 caret 作用在 `0.0.x` 版本上等同于精确版本约束，不匹配任何后续构建，dsh 的插件兼容性闸门会直接跳过该插件。
 
 ## 安全
 
